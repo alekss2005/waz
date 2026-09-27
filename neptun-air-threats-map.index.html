@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Карта повітряних загроз України — NEPTUN</title>
+  <meta name="description" content="Жива карта БПЛА, ракет, КАБ та офіційних тривог по Україні. Дані: NEPTUN." />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css" />
+  <style>
+    :root {
+      --bg: #0b0f1a;
+      --panel: #121826;
+      --text: #e8eef8;
+      --muted: #8b9bb8;
+      --accent: #5aa6ff;
+      --danger: #ff4d4f;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    #map { position: absolute; inset: 0; }
+    .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(1.05) contrast(0.9); }
+    .attrib {
+      position: absolute; z-index: 1000; bottom: 8px; left: 8px; right: 8px;
+      text-align: center; font-size: 11px; color: var(--muted);
+      background: rgba(11,15,26,.82); padding: 6px 10px; border-radius: 8px; line-height: 1.4;
+    }
+    .attrib a { color: var(--accent); text-decoration: none; }
+    .leaflet-popup-content-wrapper { background: var(--panel); color: var(--text); border-radius: 10px; }
+    .leaflet-popup-tip { background: var(--panel); }
+    .leaflet-container a.leaflet-popup-close-button { color: var(--muted); }
+    .threat-marker {
+      width: 32px; height: 32px; border-radius: 50%; border: 2.5px solid #fff;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px; box-shadow: 0 2px 10px rgba(0,0,0,.6);
+      transform-origin: center center; font-weight: 700;
+    }
+    .threat-marker.advisory { opacity: .75; border-style: dashed; }
+    .threat-marker.area-only { border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <div class="attrib">
+    Дані: <a href="https://neptun.in.ua/" target="_blank" rel="noopener">Карта повітряних тривог — NEPTUN</a>
+    (офіційний статус тривог з UkraineAlarm)
+    · Карта: <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap</a><br>
+    <strong>NEPTUN — інформаційний агрегатор, не офіційна система оповіщення.</strong>
+    У разі загрози орієнтуйтеся на державний додаток «Повітряна тривога».
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+  <script src="https://neptun.in.ua/sdk/neptun.js"></script>
+  <script>
+    const map = L.map('map', {
+      center: NEPTUN.UKRAINE_CENTER || [48.5, 31.5],
+      zoom: NEPTUN.INITIAL_ZOOM || 6,
+      minZoom: 5,
+      maxZoom: 14,
+      zoomControl: true,
+      attributionControl: false
+    });
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '© OpenStreetMap'
+    }).addTo(map);
+
+    const threatsLayer = L.layerGroup().addTo(map);
+    const alertsLayer  = L.layerGroup().addTo(map);
+
+    let oblastsGeo = null;
+    let raionsGeo  = null;
+
+    async function loadBoundaries() {
+      try {
+        const [o, r] = await Promise.all([
+          fetch('https://neptun.in.ua/oblasts.geojson').then(r => r.json()),
+          fetch('https://neptun.in.ua/raions.geojson').then(r => r.json())
+        ]);
+        oblastsGeo = o;
+        raionsGeo  = r;
+      } catch (e) {
+        console.warn('Межі не завантажились:', e);
+      }
+    }
+
+    function styleAlert(isOblast) {
+      return {
+        color: '#ff4d4f',
+        weight: isOblast ? 2.5 : 1.5,
+        opacity: 0.95,
+        fillColor: '#ff4d4f',
+        fillOpacity: isOblast ? 0.25 : 0.16,
+        dashArray: isOblast ? null : '4 3'
+      };
+    }
+
+    function updateAlerts(alerts) {
+      const raions = alerts?.raions || [];
+      const oblasts = alerts?.oblasts || [];
+      const total = raions.length + oblasts.length;
+
+      if (total === 0) {
+        alertsLayer.clearLayers();
+        return;
+      }
+
+      const items = [
+        ...oblasts.map(a => ({ ...a, level: 'oblast' })),
+        ...raions.map(a => ({ ...a, level: 'raion' }))
+      ];
+
+      alertsLayer.clearLayers();
+      const activeKeys = new Set(items.map(a => a.key));
+
+      if (oblastsGeo) {
+        L.geoJSON(oblastsGeo, {
+          filter: f => activeKeys.has(f.properties.key),
+          style: () => styleAlert(true),
+          onEachFeature: (f, layer) => {
+            const a = oblasts.find(x => x.key === f.properties.key);
+            layer.bindPopup(`<b style="color:#ff8a8a">${f.properties.region || f.properties.name || f.properties.key}</b><br>Офіційна повітряна тривога${a?.since ? '<br>З ' + new Date(a.since).toLocaleString('uk-UA') : ''}`);
+            alertsLayer.addLayer(layer);
+          }
+        });
+      }
+      if (raionsGeo) {
+        L.geoJSON(raionsGeo, {
+          filter: f => activeKeys.has(f.properties.key),
+          style: () => styleAlert(false),
+          onEachFeature: (f, layer) => {
+            const a = raions.find(x => x.key === f.properties.key);
+            layer.bindPopup(`<b style="color:#ff8a8a">${f.properties.name || f.properties.key}</b><br>Офіційна повітряна тривога${a?.since ? '<br>З ' + new Date(a.since).toLocaleString('uk-UA') : ''}`);
+            alertsLayer.addLayer(layer);
+          }
+        });
+      }
+    }
+
+    const markers = new Map();
+
+    const TYPE_ICONS = {
+      uav: '🛩', recon: '👁', missile: '🚀', ballistic: '💥',
+      kab: '💣', mig31k: '✈', fpv: '🛸', unknown: '❓'
+    };
+
+    function createIcon(type, heading, meta, isAdvisory, isAreaOnly) {
+      const color = (meta && meta.color) || '#888';
+      const icon = TYPE_ICONS[type] || (meta && meta.icon) || '●';
+      const rotate = (heading != null && !isAreaOnly) ? `transform:rotate(${heading}deg);` : '';
+      const cls = ['threat-marker'];
+      if (isAdvisory) cls.push('advisory');
+      if (isAreaOnly) cls.push('area-only');
+
+      return L.divIcon({
+        className: '',
+        html: `<div class="${cls.join(' ')}" style="background:${color};${rotate}">${icon}</div>`,
+        iconSize: [32, 32],
+        iconAnchor: [16, 16]
+      });
+    }
+
+    function popupHtml(t, p) {
+      const meta = NEPTUN.getTypeMeta(t.type) || {};
+      const title = t.title || meta.name || t.type;
+      const conf  = t.confidenceLevel ? ` · ${t.confidenceLevel}` : '';
+      const count = t.count > 1 ? ` ×${t.count}` : '';
+      const loc   = [t.locality, t.district, t.region].filter(Boolean).join(', ');
+      const adv   = t.advisory ? '<br><i style="color:#faad14">Спостереження (не сигнал ховатися)</i>' : '';
+      const area  = t.areaOnly ? '<br><i style="color:#8b9bb8">Лише область (центроїд)</i>' : '';
+      return `
+        <b>${title}${count}</b>${conf}<br>
+        ${loc || '—'}<br>
+        Курс: ${p.heading != null ? Math.round(p.heading) + '°' : '—'}
+        ${t.velocity?.speedKmh ? ' · ' + Math.round(t.velocity.speedKmh) + ' км/г' : ''}
+        ${adv}${area}
+        <br><small>${t.explanationShort || ''}</small>
+      `;
+    }
+
+    function upsertThreat(t) {
+      if (t.status === 'resolved' || t.lat == null || t.lon == null) {
+        removeThreat(t.id);
+        return;
+      }
+      const now = Date.now();
+      const p = NEPTUN.predict(t, now);
+      const meta = NEPTUN.getTypeMeta(t.type) || {};
+      const isAdv = !!t.advisory;
+      const isArea = !!t.areaOnly;
+
+      let entry = markers.get(t.id);
+      if (!entry) {
+        const icon = createIcon(t.type, p.heading, meta, isAdv, isArea);
+        const m = L.marker([p.lat, p.lon], { icon, zIndexOffset: isAdv ? 100 : 600 });
+        m.bindPopup(() => popupHtml(t, p));
+        threatsLayer.addLayer(m);
+        markers.set(t.id, { marker: m, threat: t });
+      } else {
+        entry.threat = t;
+        entry.marker.setLatLng([p.lat, p.lon]);
+        entry.marker.setIcon(createIcon(t.type, p.heading, meta, isAdv, isArea));
+      }
+    }
+
+    function removeThreat(id) {
+      const entry = markers.get(id);
+      if (entry) {
+        threatsLayer.removeLayer(entry.marker);
+        markers.delete(id);
+      }
+    }
+
+    function animate() {
+      const now = Date.now();
+      for (const { marker, threat } of markers.values()) {
+        if (threat.areaOnly) continue;
+        const p = NEPTUN.predict(threat, now);
+        marker.setLatLng([p.lat, p.lon]);
+        if (p.heading != null) {
+          const meta = NEPTUN.getTypeMeta(threat.type) || {};
+          marker.setIcon(createIcon(threat.type, p.heading, meta, !!threat.advisory, false));
+        }
+      }
+      requestAnimationFrame(animate);
+    }
+    requestAnimationFrame(animate);
+
+    const client = new NEPTUN.RealtimeClient('https://neptun.in.ua');
+
+    client.subscribe((snap) => {
+      const seen = new Set();
+      (snap.threats || []).forEach(t => {
+        seen.add(t.id);
+        upsertThreat(t);
+      });
+      for (const id of [...markers.keys()]) {
+        if (!seen.has(id)) removeThreat(id);
+      }
+
+      const alertsData = snap.alerts || {};
+      updateAlerts({
+        raions: alertsData.raions || [],
+        oblasts: alertsData.oblasts || snap.alertOblasts || []
+      });
+    });
+
+    (async () => {
+      await loadBoundaries();
+      client.start();
+    })();
+  </script>
+</body>
+</html>
